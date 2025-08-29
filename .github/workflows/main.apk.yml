@@ -1,0 +1,127 @@
+name: Build Flutter APK
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.3'
+          channel: 'stable'
+      - run: |
+          flutter create . --project-name bounty_toolkit_app
+          flutter pub add http shared_preferences
+      - run: |
+          mkdir -p android/app/src/main/res/xml
+          cat > android/app/src/main/res/xml/network_security_config.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <network-security-config>
+            <domain-config cleartextTrafficPermitted="true">
+              <domain includeSubdomains="true">127.0.0.1</domain>
+              <domain includeSubdomains="true">localhost</domain>
+            </domain-config>
+          </network-security-config>
+          XML
+          cat > android/app/src/main/AndroidManifest.xml <<'XML'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <application
+                android:label="Bounty Toolkit"
+                android:icon="@mipmap/ic_launcher"
+                android:networkSecurityConfig="@xml/network_security_config">
+              <activity
+                  android:name=".MainActivity"
+                  android:exported="true"
+                  android:theme="@style/LaunchTheme"
+                  android:launchMode="singleTop"
+                  android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                  android:hardwareAccelerated="true"
+                  android:windowSoftInputMode="adjustResize">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          XML
+      - name: Write app UI (lib/main.dart)
+        run: |
+          cat > lib/main.dart <<'DART'
+          import 'dart:convert';
+          import 'package:flutter/material.dart';
+          import 'package:http/http.dart' as http;
+          import 'package:shared_preferences/shared_preferences.dart';
+          void main() => runApp(const App());
+          class App extends StatelessWidget {
+            const App({super.key});
+            @override Widget build(BuildContext context) => MaterialApp(
+              debugShowCheckedModeBanner: false,
+              title: 'Bounty Toolkit',
+              theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.blue),
+              home: const HomePage(),
+            );
+          }
+          class HomePage extends StatefulWidget { const HomePage({super.key}); @override State<HomePage> createState()=>_HomePageState(); }
+          class _HomePageState extends State<HomePage>{
+            final _server=TextEditingController(text:'http://127.0.0.1:8000');
+            final _key=TextEditingController(); final _domain=TextEditingController(); final _targets=TextEditingController();
+            String _log=''; bool _busy=false;
+            @override void initState(){super.initState(); _load();}
+            Future<void> _load() async {final sp=await SharedPreferences.getInstance();
+              _server.text=sp.getString('server')??_server.text; _key.text=sp.getString('key')??''; setState((){});}
+            Future<void> _save() async {final sp=await SharedPreferences.getInstance();
+              await sp.setString('server',_server.text.trim()); await sp.setString('key',_key.text.trim());}
+            Uri _u(String p)=>Uri.parse(_server.text.trim()+p);
+            Map<String,String> _h(){final h={'Content-Type':'application/json'}; if(_key.text.trim().isNotEmpty)h['X-API-Key']=_key.text.trim(); return h;}
+            Future<void> _call(String path, Map body) async {
+              await _save(); setState(()=>_busy=true);
+              try{final r=await http.post(_u(path),headers:_h(),body:jsonEncode(body));
+                if(r.statusCode==200){final m=jsonDecode(r.body) as Map;
+                  setState(()=>_log=(m['log']??'').toString()+'\n\nSaved: '+(m['saved_files']?.toString()??'{}')); }
+                else setState(()=>_log='HTTP ${r.statusCode}: ${r.body}');
+              }catch(e){setState(()=>_log='Error: $e');} finally{setState(()=>_busy=false);}
+            }
+            List<String> _lines()=>_targets.text.split(RegExp(r'\\r?\\n')).map((e)=>e.trim()).where((e)=>e.isNotEmpty).toList();
+            @override Widget build(BuildContext c){
+              final btn=ElevatedButton.styleFrom(minimumSize:const Size(0,48));
+              return Scaffold(appBar:AppBar(title:const Text('Bounty Toolkit')),
+                body:Padding(padding:const EdgeInsets.all(12),child:Column(children:[
+                  Wrap(spacing:12,runSpacing:8,children:[
+                    SizedBox(width:280,child:TextField(controller:_server,decoration:const InputDecoration(border:OutlineInputBorder(),labelText:'API Server',hintText:'http://127.0.0.1:8000'))),
+                    SizedBox(width:220,child:TextField(controller:_key,decoration:const InputDecoration(border:OutlineInputBorder(),labelText:'API Key (optional)'))),
+                  ]),
+                  const SizedBox(height:12),
+                  Row(children:[
+                    Expanded(child:TextField(controller:_domain,decoration:const InputDecoration(border:OutlineInputBorder(),labelText:'Domain (subfinder/pipeline)',hintText:'example.com'))),
+                    const SizedBox(width:12),
+                    SizedBox(width:170,child:ElevatedButton.icon(onPressed:_busy?null:()=>_call('/subfinder',{'domain':_domain.text.trim()}),icon:const Icon(Icons.travel_explore),label:const Text('Subfinder'),style:btn))
+                  ]),
+                  const SizedBox(height:12),
+                  Expanded(child:TextField(controller:_targets,maxLines:null,expands:true,decoration:const InputDecoration(border:OutlineInputBorder(),labelText:'Targets (one per line)',hintText:'https://a.com\\nhttps://b.com'))),
+                  const SizedBox(height:12),
+                  Row(children:[
+                    Expanded(child:ElevatedButton.icon(onPressed:_busy?null:()=>_call('/httpx',{'targets':_lines()}),icon:const Icon(Icons.http),label:const Text('httpx'),style:btn)),
+                    const SizedBox(width:12),
+                    Expanded(child:ElevatedButton.icon(onPressed:_busy?null:()=>_call('/nuclei',{'targets':_lines()}),icon:const Icon(Icons.bolt),label:const Text('nuclei'),style:btn)),
+                  ]),
+                  const SizedBox(height:12),
+                  Row(children:[
+                    Expanded(child:ElevatedButton.icon(onPressed:_busy?null:()=>_call('/pipeline',{'domain':_domain.text.trim()}),icon:const Icon(Icons.play_circle_fill),label:const Text('Full Pipeline'),style:btn))
+                  ]),
+                  const SizedBox(height:12),
+                  Expanded(child:Container(padding:const EdgeInsets.all(12),
+                    decoration:BoxDecoration(border:Border.all(color:Colors.black26),borderRadius:BorderRadius.circular(8)),
+                    child:_busy?const Center(child:CircularProgressIndicator())
+                      :SingleChildScrollView(child:SelectableText(_log.isEmpty?'Logs will appear here…':_log)),
+                  )),
+                ])));
+            }
+          }
+          DART
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
